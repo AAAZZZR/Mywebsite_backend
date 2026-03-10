@@ -109,7 +109,7 @@ def get_rag_chain(mode='hr'):
 
     retriever = vectorstore.as_retriever(
         search_type="similarity_score_threshold",
-        search_kwargs={"score_threshold": 0.6, "k": 3})
+        search_kwargs={"score_threshold": 0.3, "k": 5})
 
     # 取得 LLM (根據全域設定)
     llm = get_llm()
