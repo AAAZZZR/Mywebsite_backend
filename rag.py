@@ -1,4 +1,7 @@
 import os
+import hashlib
+import glob as glob_mod
+import shutil
 from dotenv import load_dotenv
 from langchain_community.document_loaders import DirectoryLoader, TextLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter, MarkdownHeaderTextSplitter
@@ -21,6 +24,33 @@ LLM_PROVIDER = "gemini"
 DATA_PATH = "./data"
 # 自動根據模型區分資料庫路徑，避免向量維度衝突
 DB_PATH = f"./vector_db_{LLM_PROVIDER}"
+HASH_FILE = os.path.join(DB_PATH, ".data_hash")
+
+
+def _compute_data_hash():
+    """計算 data/ 資料夾內所有 .md 檔案的內容 hash，用來偵測資料是否有變動"""
+    h = hashlib.md5()
+    md_files = sorted(glob_mod.glob(os.path.join(DATA_PATH, "**/*.md"), recursive=True))
+    for fpath in md_files:
+        with open(fpath, "rb") as f:
+            h.update(f.read())
+    return h.hexdigest()
+
+
+def _data_has_changed():
+    """比對目前 data hash 與上次建 DB 時的 hash，不同就代表資料有更新"""
+    if not os.path.exists(HASH_FILE):
+        return True
+    with open(HASH_FILE, "r") as f:
+        old_hash = f.read().strip()
+    return _compute_data_hash() != old_hash
+
+
+def _save_data_hash():
+    """儲存目前的 data hash"""
+    os.makedirs(DB_PATH, exist_ok=True)
+    with open(HASH_FILE, "w") as f:
+        f.write(_compute_data_hash())
 
 def get_embeddings():
     """根據設定回傳對應的 Embedding 模型"""
@@ -84,32 +114,40 @@ def initialize_vector_db():
         all_splits.extend(splits)
     
     vectorstore = Chroma.from_documents(
-        documents=all_splits, 
-        embedding=get_embeddings(), 
+        documents=all_splits,
+        embedding=get_embeddings(),
         persist_directory=DB_PATH
     )
-    print(f"✅ [{LLM_PROVIDER} is established path:{DB_PATH}")
+    _save_data_hash()
+    print(f"✅ [{LLM_PROVIDER}] vector DB built with {len(all_splits)} chunks at {DB_PATH}")
     return vectorstore
 
 def get_rag_chain(mode='hr'):
     """建立 RAG 問答鏈"""
     
-    # 檢查是否已經有對應模型的向量資料庫
-    if not os.path.exists(DB_PATH):
-        print(f"找不到 {LLM_PROVIDER} 的現有資料庫，嘗試初始化...")
+    # 檢查是否需要重建向量資料庫（不存在 or 資料有更新）
+    need_rebuild = not os.path.exists(DB_PATH) or _data_has_changed()
+
+    if need_rebuild:
+        if os.path.exists(DB_PATH):
+            shutil.rmtree(DB_PATH)
+            print(f"🔄 資料有變動，刪除舊 DB: {DB_PATH}")
+        else:
+            print(f"找不到 {LLM_PROVIDER} 的現有資料庫，嘗試初始化...")
         vectorstore = initialize_vector_db()
         if not vectorstore:
             return None
     else:
-        # 讀取現有資料庫 (必須用同樣的 embedding model 讀取)
+        # 資料沒變，讀取現有資料庫
         vectorstore = Chroma(
-            persist_directory=DB_PATH, 
+            persist_directory=DB_PATH,
             embedding_function=get_embeddings()
         )
+        print(f"✅ 資料未變動，使用現有 DB: {DB_PATH}")
 
     retriever = vectorstore.as_retriever(
         search_type="similarity_score_threshold",
-        search_kwargs={"score_threshold": 0.3, "k": 5})
+        search_kwargs={"score_threshold": 0.5, "k": 3})
 
     # 取得 LLM (根據全域設定)
     llm = get_llm()
